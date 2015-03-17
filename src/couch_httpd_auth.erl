@@ -30,6 +30,8 @@
 
 -compile({no_auto_import,[integer_to_binary/1, integer_to_binary/2]}).
 
+-define(AUTH_SESSION_COOKIE_KEY, "AuthSession").
+
 special_test_authentication_handler(Req) ->
     case header_value(Req, "WWW-Authenticate") of
     "X-Couch-Test-Auth " ++ NamePass ->
@@ -180,7 +182,7 @@ cookie_authentication_handler(Req) ->
     cookie_authentication_handler(Req, couch_auth_cache).
 
 cookie_authentication_handler(#httpd{mochi_req=MochiReq}=Req, AuthModule) ->
-    case MochiReq:get_cookie_value("AuthSession") of
+    case MochiReq:get_cookie_value(?AUTH_SESSION_COOKIE_KEY) of
     undefined -> Req;
     [] -> Req;
     Cookie ->
@@ -208,8 +210,9 @@ cookie_authentication_handler(#httpd{mochi_req=MochiReq}=Req, AuthModule) ->
                 FullSecret = <<Secret/binary, UserSalt/binary>>,
                 ExpectedHash = crypto:sha_mac(FullSecret, User ++ ":" ++ TimeStr),
                 Hash = ?l2b(HashStr),
-                Timeout = list_to_integer(
-                    config:get("couch_httpd_auth", "timeout", "600")),
+                ConfiguredTimeout = list_to_integer(
+                    couch_config:get("couch_httpd_auth", "timeout", "600")),
+                Timeout = lists:max([ConfiguredTimeout, 60]),
                 couch_log:debug("timeout ~p", [Timeout]),
                 case (catch erlang:list_to_integer(TimeStr, 16)) of
                     TimeStamp when CurrentTime < TimeStamp + Timeout ->
@@ -243,7 +246,7 @@ cookie_auth_header(#httpd{user_ctx=#user_ctx{name=User}, auth={Secret, true}}=Re
     % themselves.
     CookieHeader = couch_util:get_value("Set-Cookie", Headers, ""),
     Cookies = mochiweb_cookies:parse_cookie(CookieHeader),
-    AuthSession = couch_util:get_value("AuthSession", Cookies),
+    AuthSession = couch_util:get_value(?AUTH_SESSION_COOKIE_KEY, Cookies),
     if AuthSession == undefined ->
         TimeStamp = make_cookie_time(),
         [cookie_auth_cookie(Req, ?b2l(User), Secret, TimeStamp)];
@@ -255,7 +258,7 @@ cookie_auth_header(_Req, _Headers) -> [].
 cookie_auth_cookie(Req, User, Secret, TimeStamp) ->
     SessionData = User ++ ":" ++ erlang:integer_to_list(TimeStamp, 16),
     Hash = crypto:sha_mac(Secret, SessionData),
-    mochiweb_cookies:cookie("AuthSession",
+    mochiweb_cookies:cookie(?AUTH_SESSION_COOKIE_KEY,
         couch_util:encodeBase64Url(SessionData ++ ":" ++ ?b2l(Hash)),
         [{path, "/"}] ++ cookie_scheme(Req) ++ max_age()).
 
@@ -319,7 +322,7 @@ handle_session_req(#httpd{method='POST', mochi_req=MochiReq}=Req, AuthModule) ->
                 ]});
         _Else ->
             % clear the session
-            Cookie = mochiweb_cookies:cookie("AuthSession", "", [{path, "/"}] ++ cookie_scheme(Req)),
+            Cookie = mochiweb_cookies:cookie(?AUTH_SESSION_COOKIE_KEY, "", [{path, "/"}] ++ cookie_scheme(Req)),
             {Code, Headers} = case couch_httpd:qs_value(Req, "fail", nil) of
                 nil ->
                     {401, [Cookie]};
@@ -355,7 +358,7 @@ handle_session_req(#httpd{method='GET', user_ctx=UserCtx}=Req, _AuthModule) ->
     end;
 % logout by deleting the session
 handle_session_req(#httpd{method='DELETE'}=Req, _AuthModule) ->
-    Cookie = mochiweb_cookies:cookie("AuthSession", "", [{path, "/"}] ++ cookie_scheme(Req)),
+    Cookie = mochiweb_cookies:cookie(?AUTH_SESSION_COOKIE_KEY, "", [{path, "/"}] ++ cookie_scheme(Req)),
     {Code, Headers} = case couch_httpd:qs_value(Req, "next", nil) of
         nil ->
             {200, [Cookie]};
