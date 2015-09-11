@@ -151,7 +151,7 @@ proxy_authentication_handler(Req) ->
 %% @deprecated
 proxy_authentification_handler(Req) ->
     proxy_authentication_handler(Req).
-    
+
 proxy_auth_user(Req) ->
     XHeaderUserName = config:get("couch_httpd_auth", "x_auth_username",
                                 "X-Auth-CouchDB-UserName"),
@@ -326,7 +326,8 @@ handle_session_req(#httpd{method='POST', mochi_req=MochiReq}=Req, AuthModule) ->
                 {[
                     {ok, true},
                     {name, UserName},
-                    {roles, couch_util:get_value(<<"roles">>, UserProps2, [])}
+                    {roles, couch_util:get_value(<<"roles">>, UserProps2, [])},
+                    {id_token, couch_httpd_jwt:create_jwt(UserName, UserProps2)}
                 ]});
         false ->
             authentication_warning(Req, UserName),
@@ -342,13 +343,28 @@ handle_session_req(#httpd{method='POST', mochi_req=MochiReq}=Req, AuthModule) ->
     end;
 % get user info
 % GET /_session
-handle_session_req(#httpd{method='GET', user_ctx=UserCtx}=Req, _AuthModule) ->
+handle_session_req(#httpd{method='GET', user_ctx=UserCtx}=Req, AuthModule) ->
     Name = UserCtx#user_ctx.name,
     ForceLogin = couch_httpd:qs_value(Req, "basic", "false"),
     case {Name, ForceLogin} of
         {null, "true"} ->
             throw({unauthorized, <<"Please login.">>});
         {Name, _} ->
+            IdToken = case Name of
+                null ->
+                    null;
+                _ ->
+                    UserProps = case AuthModule:get_user_creds(Req, Name) of
+                        nil ->
+                            [
+                                {<<"name">>, Name},
+                                {<<"roles">>, UserCtx#user_ctx.roles}
+                            ];
+                        {ok, Props, _AuthCtx} ->
+                            Props
+                    end,
+                    couch_httpd_jwt:create_jwt(Name, UserProps)
+            end,
             send_json(Req, {[
                 % remove this ok
                 {ok, true},
@@ -356,6 +372,7 @@ handle_session_req(#httpd{method='GET', user_ctx=UserCtx}=Req, _AuthModule) ->
                     {name, Name},
                     {roles, UserCtx#user_ctx.roles}
                 ]}},
+                {id_token, IdToken},
                 {info, {[
                     {authentication_db, ?l2b(config:get("couch_httpd_auth", "authentication_db"))},
                     {authentication_handlers, [
